@@ -1,0 +1,4 @@
+sounddevice==0.4.6
+numpy>=1.26.0
+streamlit>=1.32.0
+requests>=2.31.0
