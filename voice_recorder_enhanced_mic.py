@@ -18,12 +18,12 @@ CHANNELS = 1         # Mono
 RECORDINGS_DIR = "recordings"
 COMBINED_DIR = "combined"
 
-# Ensure directories
+# Ensure directories exist
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(COMBINED_DIR, exist_ok=True)
 
 # Initialize session state defaults
-for key, default in {
+defaults = {
     'is_recording': False,
     'recording_start_time': 0,
     'recordings': [],
@@ -31,15 +31,15 @@ for key, default in {
     'input_volume': 1.0,
     'api_key': os.getenv('ASSEMBLY_API_KEY', ''),
     'debug': []
-}.items():
+}
+for key, default in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = default
-# Persistent audio frame buffer
-tt = 'audio_frames'
-if tt not in st.session_state:
-    st.session_state[tt] = []
+# Persistent audio frames buffer
+if 'audio_frames' not in st.session_state:
+    st.session_state['audio_frames'] = []
 
-# Debug helper
+# Debug logging
 
 
 def add_debug(msg):
@@ -62,7 +62,38 @@ def get_audio_devices():
         add_debug(f"Error querying devices: {e}")
         return []
 
-# Transcribe with AssemblyAI
+# Combine recordings into one WAV
+
+
+def combine_audio_files():
+    recs = st.session_state.recordings
+    if not recs:
+        add_debug("No recordings to combine")
+        return None
+    segments = []
+    for rec in recs:
+        try:
+            with wave.open(rec['filepath'], 'rb') as wf:
+                data = wf.readframes(wf.getnframes())
+                arr = np.frombuffer(data, dtype=np.int16)
+                segments.append(arr)
+        except Exception as e:
+            add_debug(f"Error reading {rec['filepath']}: {e}")
+    if not segments:
+        add_debug("No valid audio segments found")
+        return None
+    combined = np.concatenate(segments)
+    filename = f"combined_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.wav"
+    out_path = os.path.join(COMBINED_DIR, filename)
+    with wave.open(out_path, 'wb') as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(combined.tobytes())
+    add_debug(f"Combined WAV saved: {out_path}")
+    return out_path
+
+# Transcribe audio via AssemblyAI
 
 
 def transcribe_audio(path, api_key):
@@ -89,13 +120,12 @@ with st.expander("Audio Settings", expanded=True):
     sel = st.selectbox("Select Microphone", options, index=default_idx)
     if sel != "Default":
         st.session_state.selected_device = devices[options.index(
-            sel) - 1]['index']
+            sel)-1]['index']
     else:
         st.session_state.selected_device = None
     st.session_state.input_volume = st.slider(
         "Input Volume Multiplier", 0.1, 5.0,
-        value=st.session_state.input_volume,
-        step=0.1
+        value=st.session_state.input_volume, step=0.1
     )
 
 # API Key Input
@@ -109,19 +139,16 @@ with st.expander("API Settings", expanded=False):
 # Recording Controls
 dev = st.session_state.selected_device
 vol = st.session_state.input_volume
-frames_list = st.session_state.audio_frames
+frames = st.session_state.audio_frames
 col1, col2 = st.columns(2)
 if not st.session_state.is_recording:
     if col1.button("Start Recording", use_container_width=True):
-        # Clear buffer
-        frames_list.clear()
-        # Define callback closure
+        frames.clear()
 
-        def callback(indata, frames, time_info, status):
+        def callback(indata, frames_count, time_info, status):
             if status:
                 add_debug(f"Stream status: {status}")
-            frames_list.append(indata.copy())
-        # Start stream
+            frames.append(indata.copy())
         try:
             stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
@@ -134,27 +161,25 @@ if not st.session_state.is_recording:
             st.session_state.stream = stream
             st.session_state.is_recording = True
             st.session_state.recording_start_time = time.time()
-            add_debug(f"Recording started on device {dev}")
+            add_debug(f"Recording started on {dev}")
         except Exception as e:
             st.error(f"Failed to start recording: {e}")
             add_debug(f"Stream start error: {e}")
 else:
     if col2.button("Stop Recording", use_container_width=True):
-        # Stop stream
         stream = st.session_state.get('stream')
         if stream:
             stream.stop()
             stream.close()
         st.session_state.is_recording = False
         add_debug("Recording stopped")
-        # Process frames
-        if not frames_list:
-            st.error("No audio captured. Check mic or close other apps using it.")
+        if not frames:
+            st.error("No audio captured. Check mic or close other apps.")
             add_debug("audio_frames empty")
         else:
-            flat = np.concatenate(frames_list, axis=0).flatten()
-            flat = np.clip(flat * vol, -1.0, 1.0)
-            int16 = (flat * 32767).astype(np.int16)
+            audio = np.concatenate(frames, axis=0).flatten()
+            audio = np.clip(audio * vol, -1.0, 1.0)
+            int16 = (audio * 32767).astype(np.int16)
             fname = f"recording_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.wav"
             fpath = os.path.join(RECORDINGS_DIR, fname)
             with wave.open(fpath, 'wb') as wf:
@@ -163,19 +188,22 @@ else:
                 wf.setframerate(SAMPLE_RATE)
                 wf.writeframes(int16.tobytes())
             add_debug(f"Saved WAV: {fpath}")
-            # Playback
             st.audio(fpath)
-            # Transcribe with spinner
             with st.spinner("Transcribing..."):
                 txt = transcribe_audio(fpath, st.session_state.api_key)
             st.success("Transcription complete 🎉")
             st.write(f"📝 {txt}")
-            # Save record
-            st.session_state.recordings.append({
-                'filepath': fpath,
-                'duration': len(flat)/SAMPLE_RATE,
-                'text': txt
-            })
+            st.session_state.recordings.append(
+                {'filepath': fpath, 'duration': len(audio)/SAMPLE_RATE, 'text': txt})
+
+# Combine All Recordings Button
+if st.button("Combine All Recordings", use_container_width=True):
+    combined_path = combine_audio_files()
+    if combined_path:
+        st.success(f"Combined audio saved: {combined_path}")
+        st.audio(combined_path)
+    else:
+        st.warning("Failed to combine recordings")
 
 # Live status
 if st.session_state.is_recording:
