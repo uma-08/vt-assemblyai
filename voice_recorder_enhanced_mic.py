@@ -36,6 +36,9 @@ for key, default in defaults.items():
         st.session_state[key] = default
 if 'audio_frames' not in st.session_state:
     st.session_state['audio_frames'] = []
+# allow users to pick which recordings to combine
+if 'combine_selection' not in st.session_state:
+    st.session_state.combine_selection = set()
 
 # Debug logging
 
@@ -62,12 +65,14 @@ def transcribe_audio(path, api_key):
 
 
 def combine_audio_files():
-    recs = st.session_state.recordings
-    if not recs:
-        add_debug("No recordings to combine")
+    selected_indices = st.session_state.combine_selection
+    if not selected_indices:
+        add_debug("No recordings selected for combining")
         return None
+
     segments = []
-    for rec in recs:
+    for idx in selected_indices:
+        rec = st.session_state.recordings[idx]
         try:
             with wave.open(rec['filepath'], 'rb') as wf:
                 data = wf.readframes(wf.getnframes())
@@ -75,9 +80,10 @@ def combine_audio_files():
                 segments.append(arr)
         except Exception as e:
             add_debug(f"Error reading {rec['filepath']}: {e}")
+
     if not segments:
-        add_debug("No valid audio segments found")
         return None
+
     combined = np.concatenate(segments)
     filename = f"combined_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.wav"
     out_path = os.path.join(COMBINED_DIR, filename)
@@ -182,8 +188,10 @@ def record_controls():
 with st.container():
     record_controls()
 
-# Combine All Recordings Button
-if st.button("Combine All Recordings", use_container_width=True):
+# Combine Selected Recordings Button
+selected_count = len(st.session_state.combine_selection)
+button_text = f"Combine Selected ({selected_count})" if selected_count > 0 else "Select recordings to combine"
+if st.button(button_text, use_container_width=True, disabled=selected_count == 0):
     combined_path = combine_audio_files()
     if combined_path:
         st.success(f"Combined audio saved: {combined_path}")
@@ -201,23 +209,33 @@ st.markdown("---")
 total = len(st.session_state.recordings)
 for rev_idx, rec in enumerate(reversed(st.session_state.recordings)):
     orig_idx = total - 1 - rev_idx
-    st.subheader(f"Recording {orig_idx+1}")
-    # Show tag badge
-    badge = rec.get('tag', TAG_OPTIONS[0])
-    st.markdown(
-        f"<span style='background-color:#444;color:#fff;padding:4px 8px;border-radius:4px;'>{badge}</span>", unsafe_allow_html=True)
-    # Audio + details
-    st.audio(rec['filepath'])
-    st.write(f"⏱️ Duration: {rec.get('duration', 0):.2f}s")
-    st.write(f"📝 {rec.get('text', '')}")
-    # Tag dropdown with on_change callback
-    st.selectbox(
-        "Change Tag", TAG_OPTIONS,
-        index=TAG_OPTIONS.index(badge),
-        key=f"tag_{orig_idx}",
-        on_change=on_tag_change,
-        args=(orig_idx,)
-    )
+
+    # Add selection checkbox
+    col1, col2 = st.columns([1, 10])
+    with col1:
+        if st.checkbox("", key=f"select_{orig_idx}"):
+            st.session_state.combine_selection.add(orig_idx)
+        else:
+            st.session_state.combine_selection.discard(orig_idx)
+
+    with col2:
+        st.subheader(f"Recording {orig_idx+1}")
+        # Show tag badge
+        badge = rec.get('tag', TAG_OPTIONS[0])
+        st.markdown(
+            f"<span style='background-color:#444;color:#fff;padding:4px 8px;border-radius:4px;'>{badge}</span>", unsafe_allow_html=True)
+        # Audio + details
+        st.audio(rec['filepath'])
+        st.write(f"⏱️ Duration: {rec.get('duration', 0):.2f}s")
+        st.write(f"📝 {rec.get('text', '')}")
+        # Tag dropdown with on_change callback
+        st.selectbox(
+            "Change Tag", TAG_OPTIONS,
+            index=TAG_OPTIONS.index(badge),
+            key=f"tag_{orig_idx}",
+            on_change=on_tag_change,
+            args=(orig_idx,)
+        )
 
 # Debug log
 with st.expander("Debug Log", expanded=False):
